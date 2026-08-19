@@ -1,0 +1,15 @@
+# gltest configuration for Lens.
+# Direct-mode tests (tests/direct, via `gltest tests/direct`) run entirely
+# in-process against the WASI mock and do not touch any network below.
+# Integration tests (tests/integration) target testnet_bradbury and require
+# a funded account private key supplied via .env -- never committed here.
+networks:
+  default: localnet
+  localnet:
+  testnet_bradbury: {}
+
+paths:
+  contracts: contracts
+  artifacts: artifacts
+
+environment: .env

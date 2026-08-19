@@ -1,0 +1,24 @@
+{
+  "name": "lens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-time interpretation engine for high-stakes information streams -- a GenLayer Intelligent Contract project.",
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=frontend",
+    "lint:contracts": "genvm-lint check contracts/Lens.py && genvm-lint check contracts/LensFactory.py",
+    "test:direct": "gltest tests/direct",
+    "deploy:factory": "tsx deploy/001_deploy_lens_factory.ts"
+  },
+  "dependencies": {
+    "genlayer-js": "^1.1.8",
+    "ethers": "^6.13.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

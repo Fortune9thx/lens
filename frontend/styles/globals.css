@@ -1,0 +1,262 @@
+@import "tailwindcss";
+
+:root {
+  /* Warm Interpretation -- the V7-inspired premium light aesthetic: soft
+     peach/cream gradients, warm near-black text (never pure black), a
+     coral/orange accent pulled from the hero gradient itself. */
+  --color-bg: #fffcfa;
+  --color-bg-subtle: #fff6ef;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-border: #efe3d6;
+  --color-border-strong: #e3d2bf;
+
+  --color-fg: #1c1712;
+  --color-fg-secondary: #695e52;
+  --color-fg-muted: #9c8f80;
+
+  --color-coral: #ea5b26;
+  --color-coral-dim: #c94a1c;
+  --color-coral-soft: rgba(234, 91, 38, 0.1);
+  --color-peach: #ffb27a;
+  --color-cream: #fff1e2;
+
+  --color-positive: #1e8a5f;
+  --color-positive-soft: rgba(30, 138, 95, 0.1);
+  --color-negative: #d0432a;
+  --color-negative-soft: rgba(208, 67, 42, 0.1);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  --shadow-soft: 0 1px 2px rgba(28, 23, 18, 0.04), 0 8px 24px rgba(28, 23, 18, 0.05);
+  --shadow-lifted: 0 4px 12px rgba(28, 23, 18, 0.06), 0 16px 40px rgba(28, 23, 18, 0.08);
+}
+
+:root[data-theme="dark"] {
+  --color-bg: #15110d;
+  --color-bg-subtle: #1b1610;
+  --color-surface: #1d1812;
+  --color-surface-raised: #221b14;
+  --color-border: #332a20;
+  --color-border-strong: #46392a;
+
+  --color-fg: #f6ede1;
+  --color-fg-secondary: #c3b3a0;
+  --color-fg-muted: #8a7c6c;
+
+  --color-coral: #ff7a42;
+  --color-coral-dim: #e8672f;
+  --color-coral-soft: rgba(255, 122, 66, 0.16);
+  --color-peach: #ffb27a;
+  --color-cream: #2a2015;
+
+  --color-positive: #3fbf8b;
+  --color-positive-soft: rgba(63, 191, 139, 0.14);
+  --color-negative: #ef6a4d;
+  --color-negative-soft: rgba(239, 106, 77, 0.14);
+
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.28);
+  --shadow-lifted: 0 4px 16px rgba(0, 0, 0, 0.3), 0 20px 48px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: #15110d;
+    --color-bg-subtle: #1b1610;
+    --color-surface: #1d1812;
+    --color-surface-raised: #221b14;
+    --color-border: #332a20;
+    --color-border-strong: #46392a;
+
+    --color-fg: #f6ede1;
+    --color-fg-secondary: #c3b3a0;
+    --color-fg-muted: #8a7c6c;
+
+    --color-coral: #ff7a42;
+    --color-coral-dim: #e8672f;
+    --color-coral-soft: rgba(255, 122, 66, 0.16);
+    --color-peach: #ffb27a;
+    --color-cream: #2a2015;
+
+    --color-positive: #3fbf8b;
+    --color-positive-soft: rgba(63, 191, 139, 0.14);
+    --color-negative: #ef6a4d;
+    --color-negative-soft: rgba(239, 106, 77, 0.14);
+
+    --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.28);
+    --shadow-lifted: 0 4px 16px rgba(0, 0, 0, 0.3), 0 20px 48px rgba(0, 0, 0, 0.4);
+  }
+}
+
+@theme inline {
+  --color-bg: var(--color-bg);
+  --color-bg-subtle: var(--color-bg-subtle);
+  --color-surface: var(--color-surface);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --color-fg: var(--color-fg);
+  --color-fg-secondary: var(--color-fg-secondary);
+  --color-fg-muted: var(--color-fg-muted);
+  --color-coral: var(--color-coral);
+  --color-coral-dim: var(--color-coral-dim);
+  --color-coral-soft: var(--color-coral-soft);
+  --color-peach: var(--color-peach);
+  --color-cream: var(--color-cream);
+  --color-positive: var(--color-positive);
+  --color-positive-soft: var(--color-positive-soft);
+  --color-negative: var(--color-negative);
+  --color-negative-soft: var(--color-negative-soft);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html {
+  color-scheme: light;
+}
+:root[data-theme="dark"] html,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  position: relative;
+  min-height: 100%;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The V7-referenced hero gradient: a soft, painterly peach-to-coral blob
+   drifting on a cream field, blurred heavily so it reads as atmosphere, not
+   a shape. Used only behind hero-scale sections -- content surfaces stay
+   clean and flat per the design brief. */
+.hero-gradient {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.hero-gradient::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(45% 55% at 78% 32%, rgba(234, 91, 38, 0.55), transparent 68%),
+    radial-gradient(38% 46% at 88% 58%, rgba(255, 145, 77, 0.5), transparent 70%),
+    radial-gradient(60% 60% at 62% 8%, rgba(255, 200, 150, 0.55), transparent 72%),
+    radial-gradient(70% 70% at 20% 20%, rgba(255, 241, 226, 0.9), transparent 60%);
+  filter: blur(60px) saturate(115%);
+  animation: hero-drift 26s ease-in-out infinite alternate;
+}
+
+:root[data-theme="dark"] .hero-gradient::before {
+  background:
+    radial-gradient(45% 55% at 78% 32%, rgba(255, 122, 66, 0.32), transparent 68%),
+    radial-gradient(38% 46% at 88% 58%, rgba(234, 91, 38, 0.28), transparent 70%),
+    radial-gradient(60% 60% at 62% 8%, rgba(255, 178, 122, 0.2), transparent 72%),
+    radial-gradient(70% 70% at 20% 20%, rgba(42, 32, 21, 0.9), transparent 60%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .hero-gradient::before {
+    background:
+      radial-gradient(45% 55% at 78% 32%, rgba(255, 122, 66, 0.32), transparent 68%),
+      radial-gradient(38% 46% at 88% 58%, rgba(234, 91, 38, 0.28), transparent 70%),
+      radial-gradient(60% 60% at 62% 8%, rgba(255, 178, 122, 0.2), transparent 72%),
+      radial-gradient(70% 70% at 20% 20%, rgba(42, 32, 21, 0.9), transparent 60%);
+  }
+}
+
+@keyframes hero-drift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(-2%, 1.5%, 0) scale(1.04);
+  }
+}
+
+.gradient-text {
+  background: linear-gradient(120deg, var(--color-fg) 20%, var(--color-coral) 65%, var(--color-peach));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.card-surface {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 20px;
+  box-shadow: var(--shadow-soft);
+  transition: box-shadow 200ms ease, border-color 200ms ease, transform 200ms ease;
+}
+
+.card-surface-hover:hover {
+  box-shadow: var(--shadow-lifted);
+  border-color: var(--color-border-strong);
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 1.8s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-bg-subtle) 25%,
+    var(--color-border) 50%,
+    var(--color-bg-subtle) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+::selection {
+  background: var(--color-coral-soft);
+  color: var(--color-fg);
+}
+
+* {
+  scrollbar-color: var(--color-border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}

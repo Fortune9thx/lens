@@ -1,0 +1,15 @@
+[project]
+name = "lens"
+version = "0.1.0"
+description = "Lens -- a real-time interpretation engine for high-stakes information streams, built on GenLayer Intelligent Contracts."
+requires-python = ">=3.12"
+dependencies = [
+    "genlayer-py",
+    "genlayer-test",
+    "genvm-linter",
+    "pytest",
+    "python-dotenv",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/direct"]

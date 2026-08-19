@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  contract:
+    name: Contract lint + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install .
+      - name: genvm-lint
+        run: |
+          genvm-lint check contracts/Lens.py
+          genvm-lint check contracts/LensFactory.py
+      - name: gltest (direct-mode)
+        run: gltest tests/direct -v
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install
+      - name: Lint
+        run: npm run lint --workspace=frontend
+      - name: Build
+        run: npm run build --workspace=frontend
