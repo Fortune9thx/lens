@@ -7,7 +7,7 @@
 export type LensNetworkKey = "bradbury" | "studio" | "asimov";
 
 export const LENS_FACTORY_ADDRESSES: Record<LensNetworkKey, `0x${string}` | undefined> = {
-  bradbury: undefined,
+  bradbury: "0xbdb4dcbA26B2f61552621C371d1F8Bd231b02AC6",
   studio: undefined,
   asimov: undefined,
 };
