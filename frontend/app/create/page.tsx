@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import { TransactionPanel } from "@/components/TransactionPanel";
-import { useGenLayerClient, getReadOnlyClient } from "@/lib/genlayer-client";
+import { useGenLayerClient, getReadOnlyClient, readContractRetry } from "@/lib/genlayer-client";
 import { useTransactionLifecycle } from "@/lib/useTransactionLifecycle";
 import { createLens, fetchLenses, fetchCreationStake, waitForNewLens } from "@/lib/lens-calls";
 import { getLensFactoryAddress, isLensFactoryDeployed } from "@/lib/contracts";
@@ -31,17 +31,30 @@ export default function CreateLensPage() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [creationStake, setCreationStake] = useState<string | null>(null);
+  const [creationStakeError, setCreationStakeError] = useState<string | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
   const [resolvedAddress, setResolvedAddress] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
 
   const factoryAddress = getLensFactoryAddress();
 
-  useEffect(() => {
+  function loadCreationStake() {
     if (!factoryAddress) return;
-    fetchCreationStake(getReadOnlyClient(), factoryAddress)
+    setCreationStakeError(null);
+    // Retried: this value is never cosmetic -- it's the exact `value` sent
+    // with create_lens. A silent fallback to "0" here used to mean a
+    // transient read failure would both mislead the Review step AND submit
+    // a real transaction with 0 GEN attached, which the contract then
+    // correctly rejects for insufficient stake -- a confusing failure with
+    // no visible cause. Never guess this value; show a real error instead.
+    readContractRetry(() => fetchCreationStake(getReadOnlyClient(), factoryAddress))
       .then(setCreationStake)
-      .catch(() => setCreationStake("0"));
+      .catch(() => setCreationStakeError("Couldn't load the creation stake from the network."));
+  }
+
+  useEffect(() => {
+    loadCreationStake();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [factoryAddress]);
 
   if (!isLensFactoryDeployed() || !factoryAddress) {
@@ -90,9 +103,19 @@ export default function CreateLensPage() {
   }
 
   async function handleSubmit() {
-    if (!client || !factoryAddress) return;
-    const stakeWei = creationStake ? BigInt(creationStake) : 0n;
-    const beforeLenses = await fetchLenses(getReadOnlyClient(), factoryAddress).catch(() => []);
+    // creationStake being unknown (still loading, or the retried fetch
+    // ultimately failed) must block submission rather than silently send a
+    // wrong `value` -- see loadCreationStake()'s comment for why "0" was a
+    // real bug here, not just a display issue.
+    if (!client || !factoryAddress || creationStake === null) return;
+    const stakeWei = BigInt(creationStake);
+    // Fired in parallel with run() below, NOT awaited first -- this read is
+    // only needed after the write succeeds (to resolve the new Lens's
+    // address), so blocking the wallet-signature prompt on it first was a
+    // real, reported UX bug: a slow/flaky read visibly delayed the wallet
+    // popup by however long this call took, even though the two are
+    // logically independent until the write actually finishes.
+    const beforeLensesPromise = fetchLenses(getReadOnlyClient(), factoryAddress).catch(() => []);
     // A new Lens address is exactly the kind of output other things act on
     // (the Explorer lists it, this page navigates the user straight to it,
     // they immediately stake real GEN into it) -- ACCEPTED can still be
@@ -104,6 +127,7 @@ export default function CreateLensPage() {
     );
     setResolving(true);
     try {
+      const beforeLenses = await beforeLensesPromise;
       const newAddress = await waitForNewLens(getReadOnlyClient(), factoryAddress, beforeLenses.length);
       setResolvedAddress(newAddress);
     } catch {
@@ -312,7 +336,18 @@ export default function CreateLensPage() {
                     <div>
                       <dt className="text-fg-muted">Creation stake</dt>
                       <dd className="mt-1 font-semibold text-fg">
-                        {creationStake === null ? "…" : `${formatGen(creationStake)} GEN`}
+                        {creationStakeError ? (
+                          <span className="flex items-center gap-2 text-sm font-normal text-negative">
+                            {creationStakeError}
+                            <button onClick={loadCreationStake} className="font-medium text-coral underline underline-offset-2">
+                              Retry
+                            </button>
+                          </span>
+                        ) : creationStake === null ? (
+                          <span className="inline-block h-5 w-16 animate-pulse-soft rounded bg-bg-subtle align-middle" />
+                        ) : (
+                          `${formatGen(creationStake)} GEN`
+                        )}
                       </dd>
                     </div>
                   </dl>
@@ -337,8 +372,12 @@ export default function CreateLensPage() {
               Continue <ArrowRight className="h-4 w-4" />
             </Button>
           ) : (
-            <Button onClick={handleSubmit} disabled={!client || busy}>
-              {client ? "Open this Lens" : "Connect a wallet to continue"}
+            <Button onClick={handleSubmit} disabled={!client || busy || creationStake === null}>
+              {!client
+                ? "Connect a wallet to continue"
+                : creationStake === null
+                ? "Waiting for creation stake…"
+                : "Open this Lens"}
             </Button>
           )}
         </div>

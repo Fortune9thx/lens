@@ -30,6 +30,35 @@ export function getReadOnlyClient(): GenLayerClient<GenLayerChain> {
   return _readOnlyClient;
 }
 
+/**
+ * Bradbury's gen_call read path has real, confirmed intermittent failures
+ * ("failed to get latest accepted transactions", "contract not found")
+ * against genuinely valid, successfully-deployed contracts -- observed
+ * directly during this project's own live verification, independent of
+ * contract logic. A single-attempt read on first page load is fragile
+ * against this; wrap any read that a write decision depends on (e.g. the
+ * creation stake a payable call's `value` is computed from) in this retry
+ * rather than let one transient failure silently propagate into either a
+ * fabricated fallback value or a stuck "loading" state forever.
+ */
+export async function readContractRetry<T>(
+  fn: () => Promise<T>,
+  { attempts = 4, intervalMs = 2500 }: { attempts?: number; intervalMs?: number } = {}
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 export function useGenLayerClient(): {
   client: GenLayerClient<GenLayerChain> | null;
   address: `0x${string}` | undefined;
