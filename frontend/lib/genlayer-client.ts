@@ -30,6 +30,22 @@ export function getReadOnlyClient(): GenLayerClient<GenLayerChain> {
   return _readOnlyClient;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 /**
  * Bradbury's gen_call read path has real, confirmed intermittent failures
  * ("failed to get latest accepted transactions", "contract not found")
@@ -40,15 +56,27 @@ export function getReadOnlyClient(): GenLayerClient<GenLayerChain> {
  * creation stake a payable call's `value` is computed from) in this retry
  * rather than let one transient failure silently propagate into either a
  * fabricated fallback value or a stuck "loading" state forever.
+ *
+ * Each attempt is wrapped in an explicit timeout, not just retried on
+ * rejection -- a real, observed failure mode under today's degraded network
+ * conditions is the underlying RPC call simply never settling (no timeout
+ * of its own), which would otherwise make `await fn()` hang indefinitely on
+ * the very first attempt and never even reach the retry logic below,
+ * leaving the caller's loading state stuck forever with no path to an
+ * error, let alone a successful retry.
  */
 export async function readContractRetry<T>(
   fn: () => Promise<T>,
-  { attempts = 4, intervalMs = 2500 }: { attempts?: number; intervalMs?: number } = {}
+  {
+    attempts = 5,
+    intervalMs = 2000,
+    timeoutMs = 8000,
+  }: { attempts?: number; intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await fn();
+      return await withTimeout(fn(), timeoutMs);
     } catch (err) {
       lastErr = err;
       if (i < attempts - 1) {
