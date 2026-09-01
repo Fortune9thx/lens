@@ -8,7 +8,7 @@ import { getLensFactoryAddress, isLensFactoryDeployed } from "@/lib/contracts";
 function CodeBlock({ filename, code }: { filename: string; code: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="overflow-hidden rounded-2xl border border-border-strong bg-fg shadow-[var(--shadow-soft)]">
+    <div className="overflow-hidden rounded-2xl border border-border-strong bg-code shadow-[var(--shadow-soft)]">
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5">
         <span className="flex items-center gap-1.5 text-xs text-white/50">
           <Code2 className="h-3 w-3" /> {filename}

@@ -225,7 +225,7 @@ export default function LandingPage() {
             whileInView={{ opacity: 1, x: 0 }}
             viewport={{ once: true, margin: "-80px" }}
             transition={{ duration: 0.6 }}
-            className="overflow-hidden rounded-2xl border border-border-strong bg-fg shadow-[var(--shadow-lifted)]"
+            className="overflow-hidden rounded-2xl border border-border-strong bg-code shadow-[var(--shadow-lifted)]"
           >
             <div className="flex items-center gap-1.5 border-b border-white/10 px-4 py-3">
               <span className="h-2.5 w-2.5 rounded-full bg-negative/70" />
