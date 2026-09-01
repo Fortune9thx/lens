@@ -39,12 +39,17 @@ flowchart LR
     B --> C[Anyone triggers adjudication<br/>adjudicate]
     C --> D[Leader fetches every declared<br/>source fresh]
     D --> E{Validators independently<br/>re-fetch + re-reason}
-    E -->|Agree| F[Winning interpretation<br/>becomes the live output]
+    E -->|Agree, confident| F[Winning interpretation<br/>becomes the live output]
+    E -->|No evidence, or<br/>confidence too low| K[Round marked inconclusive<br/>every backer refunded]
     E -->|Disagree| G[Consensus fails<br/>tx reverts, no state change]
     F --> H[A fresh round opens<br/>immediately]
     F --> I[External agent/contract<br/>reads get_live_interpretation]
     F --> J[Backers settle a share<br/>of the round's pool]
+    K --> H
 ```
+
+A round nobody ever adjudicates is never stuck either: `cancel_round()` (after 24h) or
+`close_lens()` (immediately) both unlock the same refund path.
 
 No interpretation becomes the live output on one model's say-so — it becomes canonical only once
 independent validators, each fetching the live evidence themselves, agree it's the strongest fit.
@@ -60,11 +65,15 @@ against the same freshly fetched evidence, reach the same conclusion.
 
 ## How to use it
 
-**1. Open a Lens** (any address may call this):
+**1. Open a Lens** (any address may call this; at least 2 sources are required — a single,
+possibly self-controlled URL isn't enough to adjudicate against):
 
 ```
 LensFactory.create_lens(sources, interpretation_type, title, description) -> address
 ```
+
+Sources are append-only afterward — anyone can call `Lens.add_source(url)` to add a corroborating
+or contradicting one, permissionlessly, at any time.
 
 **2. Submit or back an interpretation** (any address, staking GEN):
 
@@ -85,11 +94,13 @@ Lens.adjudicate() -> winning interpretation_id
 Lens.get_live_interpretation() -> { has_live, interpretation, reasoning }
 ```
 
-**5. Settle** (backers of the winning interpretation):
+**5. Settle** (backers of the winning interpretation) — or, if a round never gets a decisive winner
+(no fetchable evidence, low confidence, a timeout, or the Lens closing), every backer gets a full
+refund through the same `claim()` call instead:
 
 ```
-Lens.settle(round)
-Lens.claim(round)
+Lens.settle(round)      # only for a round that reached a decided winner
+Lens.claim(round)       # parimutuel payout, or a straight refund -- never stranded
 ```
 
 Full details in [`docs/AGENT_SDK.md`](docs/AGENT_SDK.md).
@@ -100,11 +111,11 @@ Full details in [`docs/AGENT_SDK.md`](docs/AGENT_SDK.md).
 lens/
 ├── contracts/          LensFactory.py, Lens.py
 ├── tests/
-│   ├── direct/          49 passing tests against gltest's WASI mock
+│   ├── direct/          72 passing tests against gltest's WASI mock
 │   └── integration/     Tests against a real GenLayer node (factory deploy flow)
 ├── frontend/            Next.js 15 App Router application
 ├── deploy/              Deployment scripts
-├── docs/                ARCHITECTURE.md, RESOLUTION_LOGIC.md, AGENT_SDK.md
+├── docs/                ARCHITECTURE.md, RESOLUTION_LOGIC.md, AGENT_SDK.md, AUDIT.md
 ├── gltest.config.yaml
 ├── package.json
 └── pyproject.toml
@@ -125,9 +136,10 @@ npm run dev --workspace=frontend
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full system design, storage
-constraints, and rationale behind every deliberate deviation from the naive implementation, and
+constraints, and rationale behind every deliberate deviation from the naive implementation,
 [`docs/RESOLUTION_LOGIC.md`](docs/RESOLUTION_LOGIC.md) for a line-by-line walkthrough of
-`adjudicate()`.
+`adjudicate()`, and [`docs/AUDIT.md`](docs/AUDIT.md) for a self-adversarial review pass calibrated
+against real GenLayer reviewer rejection language, and every fix it produced.
 
 ## License
 

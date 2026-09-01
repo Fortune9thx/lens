@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 import { createClient } from "genlayer-js";
 import { testnetBradbury } from "genlayer-js/chains";
-import { TransactionStatus } from "genlayer-js/types";
+import { TransactionStatus, ExecutionResult } from "genlayer-js/types";
 import type {
   GenLayerClient,
   GenLayerChain,
@@ -181,4 +181,56 @@ export async function pollConsensusStatus(
       ? "Timed out waiting for the transaction to finalize."
       : "Timed out waiting for transaction to reach a terminal status"
   );
+}
+
+// ---------------------------------------------------------------------
+// Strict success/failure determination.
+//
+// A terminal consensus status (ACCEPTED/FINALIZED) means the NETWORK
+// agreed on an outcome -- it does NOT mean that outcome was a successful
+// execution. A real, confirmed example on this exact chain: a contract
+// call that reverts via gl.vm.UserError(...) still reaches
+// statusName: ACCEPTED, with txExecutionResultName: "FINISHED_WITH_ERROR".
+// Checking statusName alone -- as this file used to -- reports that as a
+// success: a green checkmark on a transaction that changed nothing.
+//
+// The only genuinely successful outcome is the explicit allowlisted value
+// ExecutionResult.FINISHED_WITH_RETURN. Anything else -- FINISHED_WITH_ERROR,
+// the transitional NOT_VOTED value, or txExecutionResultName missing
+// entirely (it's an optional field on GenLayerTransaction) -- must be
+// treated as "not a confirmed success", never defaulted to success.
+// ---------------------------------------------------------------------
+
+const SUCCESS_STATUSES = new Set<TransactionStatus>([TransactionStatus.ACCEPTED, TransactionStatus.FINALIZED]);
+
+export interface TransactionOutcome {
+  succeeded: boolean;
+  reason: string | null;
+}
+
+export function describeTransactionOutcome(transaction: GenLayerTransaction): TransactionOutcome {
+  const status = transaction.statusName;
+  const result = transaction.txExecutionResultName;
+
+  if (!status || !SUCCESS_STATUSES.has(status)) {
+    return { succeeded: false, reason: `Transaction did not reach consensus (status: ${status ?? "unknown"}).` };
+  }
+
+  if (result === ExecutionResult.FINISHED_WITH_RETURN) {
+    return { succeeded: true, reason: null };
+  }
+
+  if (result === ExecutionResult.FINISHED_WITH_ERROR) {
+    return {
+      succeeded: false,
+      reason: "The transaction reached consensus but reverted on-chain -- nothing was changed. Check the contract's error message and try again.",
+    };
+  }
+
+  // result is undefined (missing) or ExecutionResult.NOT_VOTED -- an
+  // incomplete/ambiguous outcome. Never default this to success.
+  return {
+    succeeded: false,
+    reason: `Transaction reached consensus but its execution result is unconfirmed (${result ?? "missing"}). Not treating this as a success.`,
+  };
 }

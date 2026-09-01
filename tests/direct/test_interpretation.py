@@ -6,7 +6,7 @@ from gltest.direct import VMContext, deploy_contract, create_test_addresses
 
 from conftest import LENS_PATH, to_hex
 
-SOURCES = ["https://example.com/feed"]
+SOURCES = ["https://example.com/feed", "https://example.org/feed"]
 
 
 def _deploy_open_lens(vm, creator):

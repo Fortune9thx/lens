@@ -4,7 +4,7 @@ from gltest.direct import VMContext, deploy_contract, create_test_addresses
 
 from conftest import LENS_PATH, to_hex
 
-SOURCES = ["https://example.com/feed"]
+SOURCES = ["https://example.com/feed", "https://example.org/feed"]
 
 
 def _deploy(vm, *args):
@@ -28,10 +28,17 @@ def test_valid_lens_deploys_active_and_open():
         assert info["interpretation_count"] == "0"
 
 
-def test_requires_at_least_one_source():
+def test_requires_at_least_two_sources():
     vm = VMContext()
     with vm.activate():
-        with vm.expect_revert("At least one source"):
+        with vm.expect_revert("At least 2 sources"):
+            _deploy(vm, ["https://example.com/feed"], "market", "Title", "Desc")
+
+
+def test_rejects_empty_sources():
+    vm = VMContext()
+    with vm.activate():
+        with vm.expect_revert("At least 2 sources"):
             _deploy(vm, [], "market", "Title", "Desc")
 
 
@@ -46,7 +53,14 @@ def test_rejects_non_http_source():
     vm = VMContext()
     with vm.activate():
         with vm.expect_revert("http(s)"):
-            _deploy(vm, ["ftp://example.com/feed"], "market", "Title", "Desc")
+            _deploy(vm, ["https://example.com/feed", "ftp://example.com/feed"], "market", "Title", "Desc")
+
+
+def test_rejects_duplicate_sources():
+    vm = VMContext()
+    with vm.activate():
+        with vm.expect_revert("unique"):
+            _deploy(vm, ["https://example.com/feed", "https://example.com/feed"], "market", "Title", "Desc")
 
 
 def test_requires_interpretation_type():
@@ -72,7 +86,7 @@ def test_description_is_optional():
         assert lens.get_lens_info()["description"] == ""
 
 
-def test_round_one_starts_open():
+def test_round_one_starts_open_with_opened_at_recorded():
     vm = VMContext()
     creator, = create_test_addresses(1)
     with vm.activate():
@@ -82,3 +96,4 @@ def test_round_one_starts_open():
         assert round_info["status"] == "open"
         assert round_info["pool"] == "0"
         assert round_info["interpretation_ids"] == []
+        assert int(round_info["opened_at"]) > 0

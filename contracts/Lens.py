@@ -11,6 +11,7 @@ import genlayer.gl as gl
 # Constants
 # ----------------------------------------------------------------------------
 
+MIN_SOURCES = 2
 MAX_SOURCES = 5
 MAX_URL_LEN = 500
 MAX_TITLE_LEN = 140
@@ -21,11 +22,29 @@ MAX_STRUCTURED_CLAIMS_RAW_LEN = 4000
 MAX_CLAIM_FIELD_LEN = 300
 MAX_INTERPRETATIONS_PER_ROUND = 12
 MAX_REASONING_LEN = 500
+MAX_SOURCE_EXCERPT_LEN = 2000
 MAX_EVIDENCE_ITEM_LEN = 400
 MAX_EVIDENCE_ITEMS = 8
 MAX_LOG_ENTRIES_RETURNED = 50
 
 CONFIDENCE_AGREEMENT_TOLERANCE = 0.15
+
+# Fail-closed gate: a winner is only crowned -- and real backer capital only
+# ever moves -- if the adjudicator's own reported confidence in its pick
+# clears this bar. Below it, or when no live evidence could be fetched at
+# all, the round is marked inconclusive and every backer gets a full refund
+# instead of a coin-flip-or-worse decision settling real stake. This is a
+# comparative "which interpretation fits the evidence" judgment, not an
+# absolute-certainty gate like a one-shot resolution would need, so 0.5 (a
+# genuine better-than-guessing bar) is the right level rather than Helm's
+# stricter 0.78 (which gates an irreversible operational ACTION, not a
+# reversible "which candidate wins this round" pick).
+CONFIDENCE_THRESHOLD = 0.5
+
+# How long a round may sit open with no adjudication before ANYONE can
+# cancel it and unlock refunds for its backers. Prevents stake from being
+# stranded forever behind a Lens nobody bothers to (or ever will) adjudicate.
+ROUND_TIMEOUT_SECONDS = 86400  # 24 hours
 
 STATUS_ACTIVE = "active"
 STATUS_CLOSED = "closed"
@@ -34,6 +53,20 @@ ROUND_OPEN = "open"
 ROUND_ADJUDICATING = "adjudicating"
 ROUND_ADJUDICATED = "adjudicated"
 ROUND_SETTLED = "settled"
+# Adjudication ran but found no fetchable evidence, or confidence was below
+# CONFIDENCE_THRESHOLD -- no winner, no live-output change, full refunds.
+ROUND_INCONCLUSIVE = "inconclusive"
+# Round timed out with no adjudication (cancel_round), or its Lens was
+# closed while it was still open (close_lens) -- no winner, full refunds.
+ROUND_CANCELLED = "cancelled"
+
+CLAIMABLE_ROUND_STATUSES = (ROUND_SETTLED, ROUND_INCONCLUSIVE, ROUND_CANCELLED)
+
+# Internal leader/validator agreement signal -- distinct from ROUND_* (round
+# lifecycle state) and never stored as a top-level round status itself, only
+# echoed inside round_reasoning for display.
+DECISION_DECIDED = "decided"
+DECISION_NO_EVIDENCE = "no_evidence"
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # Curly braces and triple-backtick fences are stripped from every
@@ -197,6 +230,21 @@ class Lens(gl.Contract):
     "updatable" property that distinguishes Lens from a prediction market or
     a court -- the live output can change as the underlying source evolves.
 
+    Adjudication is fail-closed: if every declared source fails to fetch, or
+    the adjudicator's own confidence in its pick falls below
+    CONFIDENCE_THRESHOLD, the round is marked inconclusive -- no winner is
+    crowned, the live output is left untouched, and every backer in that
+    round gets a full refund via claim(). A round nobody ever adjudicates,
+    or a Lens that gets closed while a round is still open, is never
+    permanently stuck either: cancel_round() (after ROUND_TIMEOUT_SECONDS)
+    and close_lens() (immediately) both unlock the same refund path.
+
+    Sources are append-only after creation via add_source() -- permissionless,
+    by design. A creator cannot quietly swap out an inconvenient source, and
+    anyone who thinks a Lens's evidence base is too narrow or one-sided can
+    add a corroborating (or contradicting) source themselves; every future
+    adjudicate() call fetches and weighs the full accumulated set.
+
     Deployed exclusively via LensFactory.create_lens() -> gl.deploy_contract.
     Storage uses only TreeMap[str, str] (JSON-encoded values) and
     DynArray[str] -- non-str TreeMap value types are confirmed to deploy
@@ -222,15 +270,20 @@ class Lens(gl.Contract):
 
     current_round: u256
 
-    # round(str) -> "open" | "adjudicating" | "adjudicated" | "settled"
+    # round(str) -> "open" | "adjudicating" | "adjudicated" | "settled" |
+    #               "inconclusive" | "cancelled"
     round_status: TreeMap[str, str]
+    # round(str) -> str(unix timestamp the round opened) -- used by
+    # cancel_round()'s timeout check.
+    round_opened_at: TreeMap[str, str]
     # round(str) -> str(total_wei_staked_this_round)
     round_pool: TreeMap[str, str]
     # round(str) -> JSON list[str] of interpretation ids submitted this round
     round_interpretation_ids: TreeMap[str, str]
     # round(str) -> winning interpretation id for that round (post-adjudication)
     round_winner: TreeMap[str, str]
-    # round(str) -> JSON {reasoning, confidence, evaluated_at, evidence_snapshot}
+    # round(str) -> JSON {reasoning, confidence, evaluated_at, evidence_snapshot,
+    #                      sources_checked, outcome}
     round_reasoning: TreeMap[str, str]
 
     # interpretation_id -> JSON {id, round, author, content, structured_claims,
@@ -263,8 +316,11 @@ class Lens(gl.Contract):
         # `genlayer deploy`, bypassing LensFactory (and whatever limits only
         # live there) entirely. Every constraint that matters must be
         # enforced here too, never assumed pre-checked by a caller.
-        if not sources:
-            raise gl.vm.UserError("At least one source is required.")
+        if len(sources) < MIN_SOURCES:
+            raise gl.vm.UserError(
+                f"At least {MIN_SOURCES} sources are required for evidentiary corroboration -- a single, "
+                "possibly creator-controlled URL is not enough to adjudicate against."
+            )
         if len(sources) > MAX_SOURCES:
             raise gl.vm.UserError(f"At most {MAX_SOURCES} sources are allowed.")
         if any(
@@ -272,6 +328,8 @@ class Lens(gl.Contract):
             for u in sources
         ):
             raise gl.vm.UserError(f"Sources must be http(s) URLs, each at most {MAX_URL_LEN} characters.")
+        if len(set(u.strip() for u in sources)) != len(sources):
+            raise gl.vm.UserError("Sources must be unique.")
         type_s = _sanitize_input(interpretation_type, MAX_TYPE_LEN)
         if not type_s:
             raise gl.vm.UserError("interpretation_type is required.")
@@ -292,6 +350,7 @@ class Lens(gl.Contract):
 
         self.current_round = u256(1)
         self.round_status["1"] = ROUND_OPEN
+        self.round_opened_at["1"] = str(int(self.created_at))
 
         self.interpretation_count = u256(0)
         self.live_interpretation_id = ""
@@ -301,6 +360,23 @@ class Lens(gl.Contract):
         self.last_adjudicated = u256(0)
 
         self.lens_id = f"{self.creator.as_hex}-{self.created_at}"
+
+    # ------------------------------------------------------------------
+    # Sources -- append-only, permissionless (see class docstring)
+    # ------------------------------------------------------------------
+
+    @gl.public.write
+    def add_source(self, url: str) -> None:
+        if self.status != STATUS_ACTIVE:
+            raise gl.vm.UserError("Lens is closed.")
+        url_s = url.strip()
+        if not url_s or len(url_s) > MAX_URL_LEN or not (url_s.startswith("http://") or url_s.startswith("https://")):
+            raise gl.vm.UserError(f"Source must be a non-empty http(s) URL, at most {MAX_URL_LEN} characters.")
+        if url_s in list(self.sources):
+            raise gl.vm.UserError("Source already added.")
+        if len(self.sources) >= MAX_SOURCES:
+            raise gl.vm.UserError(f"This Lens already has the maximum of {MAX_SOURCES} sources.")
+        self.sources.append(url_s)
 
     # ------------------------------------------------------------------
     # Interpretations
@@ -406,7 +482,11 @@ class Lens(gl.Contract):
             raise gl.vm.UserError("No interpretations submitted this round.")
 
         # Reentrancy-style guard: mark the round mid-adjudication before the
-        # nondet call so a second adjudicate() call can't race this one.
+        # nondet call so a second adjudicate() call can't race this one. If
+        # anything after this point causes the transaction to revert, GenVM
+        # rolls back every state change in it -- including this line -- so
+        # the round is never left permanently stuck at ROUND_ADJUDICATING by
+        # a failed attempt; it simply reverts back to ROUND_OPEN.
         self.round_status[round_str] = ROUND_ADJUDICATING
 
         # Copy everything the nondet block needs into locals first -- nondet
@@ -424,6 +504,7 @@ class Lens(gl.Contract):
                     "structured_claims": rec["structured_claims"],
                 }
             )
+        valid_ids = [c["id"] for c in candidates]
 
         def leader_fn():
             evidence = []
@@ -432,8 +513,36 @@ class Lens(gl.Contract):
                     fetched = gl.nondet.web.render(url, mode="text", wait_after_loaded="3s") or ""
                 except Exception:
                     fetched = ""
-                excerpt = _sanitize_input(fetched, MAX_EVIDENCE_ITEM_LEN * MAX_EVIDENCE_ITEMS)
-                evidence.append({"url": url, "excerpt": excerpt[: MAX_EVIDENCE_ITEM_LEN * 4]})
+                excerpt = _sanitize_input(fetched, MAX_SOURCE_EXCERPT_LEN)
+                evidence.append({"url": url, "excerpt": excerpt})
+
+            # Deterministic, contract-derived evidence record -- NOT sourced
+            # from the LLM's own self-reported claim about what it looked
+            # at. A self-reported "evidence_snapshot" field could paraphrase,
+            # misquote, or simply fabricate a plausible-looking excerpt with
+            # nothing binding it to what was actually fetched. Slicing the
+            # real fetched content here means the on-chain evidence record
+            # is provably what every validator (and every later reader)
+            # actually retrieved, independent of anything the model claims.
+            evidence_snapshot = [
+                {"url": e["url"], "excerpt": e["excerpt"][:MAX_EVIDENCE_ITEM_LEN]}
+                for e in evidence
+                if e["excerpt"]
+            ][:MAX_EVIDENCE_ITEMS]
+
+            # Fail closed, deterministically, with no LLM call at all: if
+            # every declared source came back empty, there is nothing to
+            # judge fit against, and every validator independently observes
+            # the same "no evidence" outcome -- guaranteed agreement without
+            # needing the model to agree on anything.
+            if not evidence_snapshot:
+                return {
+                    "decision": DECISION_NO_EVIDENCE,
+                    "winner_id": "",
+                    "confidence": "0.0",
+                    "reasoning": "No live evidence could be fetched from any declared source.",
+                    "evidence_snapshot": [],
+                }
 
             prompt = f"""You are the adjudicator for Lens, a real-time interpretation engine.
 A Lens tracks one concrete source or domain. Multiple participants have
@@ -472,39 +581,44 @@ Steps:
    claims actually fit the live evidence, using strict, literal criteria.
 3. Select the interpretation whose fit is strongest. If two are genuinely
    indistinguishable, prefer the one with more specific, falsifiable claims.
-4. Produce a short, evidence-citing reasoning summary.
+4. Report your own honest confidence in this pick. This is not a formality:
+   a low-confidence pick will NOT be acted on -- no interpretation will
+   become live and no stake will move -- so do not inflate it.
 
 Respond with ONLY a single valid JSON object, no other text, in exactly this
 shape:
 {{
   "winner_id": "<the id of the strongest-fitting interpretation, exactly as given above>",
   "confidence": "<a quoted decimal string between \\"0.0\\" and \\"1.0\\", e.g. \\"0.82\\" -- it MUST be a quoted JSON string, never a bare number>",
-  "reasoning": "<no more than 400 characters, cite the evidence you relied on>",
-  "evidence_snapshot": ["<short excerpt actually used>", "..."]
+  "reasoning": "<no more than 400 characters, cite the evidence you relied on>"
 }}"""
             raw_response = gl.nondet.exec_prompt(prompt)
             parsed = _parse_json_object(raw_response)
 
             winner_id = str(parsed.get("winner_id", "")).strip()
-            valid_ids = [c["id"] for c in candidates]
             if winner_id not in valid_ids:
                 winner_id = valid_ids[0]
-            parsed["winner_id"] = winner_id
-            parsed["confidence"] = _stringify_confidence(parsed.get("confidence"))
-            parsed["reasoning"] = str(parsed.get("reasoning", ""))[:MAX_REASONING_LEN]
 
-            snapshot = parsed.get("evidence_snapshot", [])
-            if not isinstance(snapshot, list):
-                snapshot = []
-            parsed["evidence_snapshot"] = [str(s)[:MAX_EVIDENCE_ITEM_LEN] for s in snapshot][:MAX_EVIDENCE_ITEMS]
-
-            return parsed
+            return {
+                "decision": DECISION_DECIDED,
+                "winner_id": winner_id,
+                "confidence": _stringify_confidence(parsed.get("confidence")),
+                "reasoning": str(parsed.get("reasoning", ""))[:MAX_REASONING_LEN],
+                "evidence_snapshot": evidence_snapshot,
+            }
 
         def validator_fn(leader_result) -> bool:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
             leader_data = leader_result.calldata
             mine = leader_fn()
+
+            if mine.get("decision") != leader_data.get("decision"):
+                return False
+            if mine.get("decision") == DECISION_NO_EVIDENCE:
+                # Both independently found no fetchable evidence -- genuine
+                # agreement, nothing further to compare.
+                return True
             try:
                 winner_agrees = mine.get("winner_id") == leader_data.get("winner_id")
                 my_confidence = float(mine.get("confidence", "0.0"))
@@ -516,23 +630,57 @@ shape:
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
-        valid_ids = [c["id"] for c in candidates]
+        now = _consensus_now()
+        decision = result.get("decision", DECISION_NO_EVIDENCE)
+        confidence = _stringify_confidence(result.get("confidence"))
+        try:
+            confidence_val = float(confidence)
+        except ValueError:
+            confidence_val = 0.0
+
+        reasoning_record = {
+            "reasoning": str(result.get("reasoning", ""))[:MAX_REASONING_LEN],
+            "confidence": confidence,
+            "evidence_snapshot": result.get("evidence_snapshot", []),
+            "evaluated_at": str(now),
+            "sources_checked": sources,
+        }
+
+        next_round = int(self.current_round) + 1
+
+        # Fail closed: no fetchable evidence, or confidence below the bar --
+        # never crown a winner or move real staked capital on a decision
+        # that isn't genuinely well-supported. Every backer this round gets
+        # a full refund via claim(), same as a cancelled round.
+        if decision != DECISION_DECIDED or confidence_val < CONFIDENCE_THRESHOLD:
+            reasoning_record["outcome"] = "inconclusive"
+            self.round_reasoning[round_str] = json.dumps(reasoning_record)
+            self.adjudication_log.append(
+                json.dumps(
+                    {
+                        "round": round_str,
+                        "winner_id": "",
+                        "confidence": confidence,
+                        "candidate_count": len(candidates),
+                        "evaluated_at": str(now),
+                        "outcome": "inconclusive",
+                    }
+                )
+            )
+            self.round_status[round_str] = ROUND_INCONCLUSIVE
+            self.current_round = u256(next_round)
+            self.round_status[str(next_round)] = ROUND_OPEN
+            self.round_opened_at[str(next_round)] = str(now)
+            self.last_adjudicated = u256(now)
+            return ""
+
         winner_id = result.get("winner_id", "")
         if winner_id not in valid_ids:
             winner_id = valid_ids[0]
-        confidence = _stringify_confidence(result.get("confidence"))
-        now = _consensus_now()
 
+        reasoning_record["outcome"] = "decided"
         self.round_winner[round_str] = winner_id
-        self.round_reasoning[round_str] = json.dumps(
-            {
-                "reasoning": str(result.get("reasoning", ""))[:MAX_REASONING_LEN],
-                "confidence": confidence,
-                "evidence_snapshot": result.get("evidence_snapshot", []),
-                "evaluated_at": str(now),
-                "sources_checked": sources,
-            }
-        )
+        self.round_reasoning[round_str] = json.dumps(reasoning_record)
 
         self.live_interpretation_id = winner_id
         self.live_round = self.current_round
@@ -547,17 +695,30 @@ shape:
                     "confidence": confidence,
                     "candidate_count": len(candidates),
                     "evaluated_at": str(now),
+                    "outcome": "decided",
                 }
             )
         )
 
         self.round_status[round_str] = ROUND_ADJUDICATED
 
-        next_round = int(self.current_round) + 1
         self.current_round = u256(next_round)
         self.round_status[str(next_round)] = ROUND_OPEN
+        self.round_opened_at[str(next_round)] = str(now)
 
         return winner_id
+
+    @gl.public.write
+    def cancel_round(self, round: str) -> None:
+        status = self.round_status.get(round, "")
+        if status not in (ROUND_OPEN, ROUND_ADJUDICATING):
+            raise gl.vm.UserError("Round is not open or adjudicating; it cannot be cancelled.")
+        opened_at = int(self.round_opened_at.get(round, "0"))
+        if _consensus_now() < opened_at + ROUND_TIMEOUT_SECONDS:
+            raise gl.vm.UserError(
+                f"Round can only be cancelled after {ROUND_TIMEOUT_SECONDS} seconds with no adjudication."
+            )
+        self.round_status[round] = ROUND_CANCELLED
 
     # ------------------------------------------------------------------
     # Settlement
@@ -571,37 +732,51 @@ shape:
 
     @gl.public.write
     def claim(self, round: str) -> None:
-        if self.round_status.get(round, "") != ROUND_SETTLED:
-            raise gl.vm.UserError("Round has not been settled yet.")
+        status = self.round_status.get(round, "")
+        if status not in CLAIMABLE_ROUND_STATUSES:
+            raise gl.vm.UserError("Round is not yet claimable.")
 
         sender_hex = _normalize_address(gl.message.sender_address.as_hex)
         claim_key = f"{round}:{sender_hex}"
         if self.claimed.get(claim_key, "") == "1":
             raise gl.vm.UserError("Already claimed for this round.")
 
-        winner_id = self.round_winner.get(round, "")
         ids = json.loads(self.round_interpretation_ids.get(round, "[]"))
-
         participated = False
-        my_amount_in_winner = 0
-        for iid in ids:
-            rec = json.loads(self.interpretations[iid])
-            backers = rec.get("backers", {})
-            if sender_hex in backers:
-                participated = True
-                if iid == winner_id:
-                    my_amount_in_winner = int(backers[sender_hex])
+        payout = 0
+
+        if status == ROUND_SETTLED:
+            winner_id = self.round_winner.get(round, "")
+            my_amount_in_winner = 0
+            for iid in ids:
+                rec = json.loads(self.interpretations[iid])
+                backers = rec.get("backers", {})
+                if sender_hex in backers:
+                    participated = True
+                    if iid == winner_id:
+                        my_amount_in_winner = int(backers[sender_hex])
+            if my_amount_in_winner > 0 and winner_id:
+                winner_rec = json.loads(self.interpretations[winner_id])
+                winner_total = int(winner_rec.get("total_stake", "0"))
+                pool = int(self.round_pool.get(round, "0"))
+                if winner_total > 0:
+                    payout = (my_amount_in_winner * pool) // winner_total
+        else:
+            # ROUND_INCONCLUSIVE or ROUND_CANCELLED: a straight refund of the
+            # caller's own stake across every interpretation they backed in
+            # this round. There is no winner to redistribute losers' stake
+            # to -- nobody "lost", the round simply never produced a
+            # sufficiently well-supported decision, so nobody's capital is
+            # put at risk for it.
+            for iid in ids:
+                rec = json.loads(self.interpretations[iid])
+                backers = rec.get("backers", {})
+                if sender_hex in backers:
+                    participated = True
+                    payout += int(backers[sender_hex])
 
         if not participated:
             raise gl.vm.UserError("No stake found for caller in this round.")
-
-        payout = 0
-        if my_amount_in_winner > 0 and winner_id:
-            winner_rec = json.loads(self.interpretations[winner_id])
-            winner_total = int(winner_rec.get("total_stake", "0"))
-            pool = int(self.round_pool.get(round, "0"))
-            if winner_total > 0:
-                payout = (my_amount_in_winner * pool) // winner_total
 
         # Effects before interaction: mark claimed prior to the transfer.
         self.claimed[claim_key] = "1"
@@ -620,6 +795,17 @@ shape:
         if self.status == STATUS_CLOSED:
             raise gl.vm.UserError("Lens is already closed.")
         self.status = STATUS_CLOSED
+
+        # A closed Lens can never adjudicate again, so an open or
+        # in-flight round would otherwise strand its backers' stake
+        # forever with no path to ROUND_ADJUDICATED and therefore no path
+        # to settle()/claim(). Cancelling it immediately unlocks refunds
+        # right away instead of forcing backers to wait out
+        # ROUND_TIMEOUT_SECONDS for cancel_round().
+        round_str = str(int(self.current_round))
+        current_status = self.round_status.get(round_str, "")
+        if current_status in (ROUND_OPEN, ROUND_ADJUDICATING):
+            self.round_status[round_str] = ROUND_CANCELLED
 
     # ------------------------------------------------------------------
     # Views
@@ -715,6 +901,7 @@ shape:
         return {
             "round": round,
             "status": self.round_status.get(round, ""),
+            "opened_at": self.round_opened_at.get(round, "0"),
             "pool": self.round_pool.get(round, "0"),
             "winner_id": self.round_winner.get(round, ""),
             "reasoning": json.loads(self.round_reasoning.get(round, "{}")),
@@ -739,27 +926,40 @@ shape:
 
     @gl.public.view
     def get_claimable(self, round: str, address: str) -> str:
-        if self.round_status.get(round, "") not in (ROUND_ADJUDICATED, ROUND_SETTLED):
+        status = self.round_status.get(round, "")
+        if status not in CLAIMABLE_ROUND_STATUSES:
             return "0"
-        claim_key = f"{round}:{_normalize_address(address)}"
+        sender_hex = _normalize_address(address)
+        claim_key = f"{round}:{sender_hex}"
         if self.claimed.get(claim_key, "") == "1":
             return "0"
-        winner_id = self.round_winner.get(round, "")
-        if not winner_id:
-            return "0"
-        winner_raw = self.interpretations.get(winner_id, "")
-        if not winner_raw:
-            return "0"
-        winner_rec = json.loads(winner_raw)
-        backers = winner_rec.get("backers", {})
-        my_amount = int(backers.get(_normalize_address(address), "0"))
-        if my_amount == 0:
-            return "0"
-        winner_total = int(winner_rec.get("total_stake", "0"))
-        pool = int(self.round_pool.get(round, "0"))
-        if winner_total == 0:
-            return "0"
-        return str((my_amount * pool) // winner_total)
+
+        if status == ROUND_SETTLED:
+            winner_id = self.round_winner.get(round, "")
+            winner_raw = self.interpretations.get(winner_id, "")
+            if not winner_raw:
+                return "0"
+            winner_rec = json.loads(winner_raw)
+            backers = winner_rec.get("backers", {})
+            my_amount = int(backers.get(sender_hex, "0"))
+            if my_amount == 0:
+                return "0"
+            winner_total = int(winner_rec.get("total_stake", "0"))
+            pool = int(self.round_pool.get(round, "0"))
+            if winner_total == 0:
+                return "0"
+            return str((my_amount * pool) // winner_total)
+
+        ids = json.loads(self.round_interpretation_ids.get(round, "[]"))
+        total = 0
+        for iid in ids:
+            raw = self.interpretations.get(iid, "")
+            if not raw:
+                continue
+            rec = json.loads(raw)
+            backers = rec.get("backers", {})
+            total += int(backers.get(sender_hex, "0"))
+        return str(total)
 
     @gl.public.view
     def is_claimed(self, round: str, address: str) -> bool:

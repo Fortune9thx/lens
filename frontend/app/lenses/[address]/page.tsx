@@ -13,6 +13,7 @@ import { StakeDialog } from "@/components/StakeDialog";
 import { SubmitInterpretationDialog } from "@/components/SubmitInterpretationDialog";
 import { AdjudicationTheater } from "@/components/AdjudicationTheater";
 import { SettlementPanel } from "@/components/SettlementPanel";
+import { AddSourceDialog } from "@/components/AddSourceDialog";
 import { getReadOnlyClient } from "@/lib/genlayer-client";
 import {
   fetchLensInfo,
@@ -37,6 +38,7 @@ export default function LensDetailPage() {
   const [submitOpen, setSubmitOpen] = useState(false);
   const [backTarget, setBackTarget] = useState<string | null>(null);
   const [theaterOpen, setTheaterOpen] = useState(false);
+  const [addSourceOpen, setAddSourceOpen] = useState(false);
 
   const refresh = useCallback(() => {
     if (!address) return;
@@ -110,15 +112,32 @@ export default function LensDetailPage() {
 
       <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-fg-muted">
         <span className="flex items-center gap-1.5">
-          <Globe className="h-4 w-4" /> {info.sources.length} source{info.sources.length === 1 ? "" : "s"}
-        </span>
-        <span className="flex items-center gap-1.5">
           <Scale className="h-4 w-4" /> Round {info.current_round}
         </span>
         <span className="flex items-center gap-1.5">
           <Clock className="h-4 w-4" /> Opened {timeAgo(info.created_at)}
         </span>
         <span>By {shortenAddress(info.address_creator)}</span>
+      </div>
+
+      <div className="mt-4 rounded-2xl border border-border bg-bg-subtle p-4">
+        <div className="flex items-center justify-between">
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-fg-muted">
+            <Globe className="h-3.5 w-3.5" /> {info.sources.length} evidence source{info.sources.length === 1 ? "" : "s"}
+          </p>
+          {info.status === "active" && (
+            <Button size="sm" variant="ghost" onClick={() => setAddSourceOpen(true)}>
+              <Plus className="h-3.5 w-3.5" /> Add source
+            </Button>
+          )}
+        </div>
+        <ul className="mt-2 flex flex-col gap-1">
+          {info.sources.map((src) => (
+            <li key={src} className="truncate font-mono text-xs text-fg-secondary">
+              {src}
+            </li>
+          ))}
+        </ul>
       </div>
 
       <div className="mt-10">
@@ -251,9 +270,18 @@ export default function LensDetailPage() {
         />
       )}
 
+      <AddSourceDialog
+        open={addSourceOpen}
+        onOpenChange={setAddSourceOpen}
+        lensAddress={address}
+        existingSources={info.sources}
+        onSuccess={refresh}
+      />
+
       {theaterOpen && roundInterpretations && (
         <AdjudicationTheater
           lensAddress={address}
+          round={info.current_round}
           sources={info.sources}
           candidates={roundInterpretations}
           onClose={() => setTheaterOpen(false)}

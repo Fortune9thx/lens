@@ -6,6 +6,7 @@ from datetime import datetime
 from genlayer import *
 import genlayer.gl as gl
 
+MIN_SOURCES = 2
 MAX_SOURCES = 5
 MAX_URL_LEN = 500
 MAX_TITLE_LEN = 140
@@ -29,6 +30,17 @@ def _normalize_address(addr: str) -> str:
     return addr.strip().lower()
 
 
+@gl.evm.contract_interface
+class _Recipient:
+    """Nameless-transfer interface used to pay out native GEN to a wallet."""
+
+    class View:
+        pass
+
+    class Write:
+        pass
+
+
 class LensFactory(gl.Contract):
     """
     Registry + on-chain factory for Lens interpretation engines.
@@ -42,15 +54,23 @@ class LensFactory(gl.Contract):
     Lens.adjudicate() changes that state continuously after deployment and
     this contract has no reliable way to be pushed updates from it (inline
     cross-contract writes are confirmed to silently no-op on Bradbury; see
-    docs/ARCHITECTURE.md). Every write on this contract and on every Lens it
-    spawns is permissionless, economically gated by the creation stake and
-    interpretation staking rather than by an admin allowlist -- `owner` is
-    informational provenance only, it gates nothing.
+    docs/ARCHITECTURE.md).
+
+    Every write that spawns or reads a Lens is permissionless, economically
+    gated by the creation stake and interpretation staking rather than an
+    admin allowlist -- `owner` gates exactly one thing, and only one thing:
+    withdraw_fees(), recovering accumulated creation stakes so they are never
+    permanently stranded in this contract with no recovery path.
     """
 
     lens_code: str
     creation_stake: u256
     owner: Address
+    # Running total of GEN received via create_lens that has not yet been
+    # withdrawn -- tracked explicitly rather than inferred from the
+    # contract's own native balance, so withdraw_fees() always pays out
+    # exactly what create_lens actually collected, no more and no less.
+    collected_fees: u256
     lens_addresses: DynArray[str]
     # lens_address_hex(normalized) -> JSON {address, sources, interpretation_type,
     #                                        title, description, creator, created_at, stake}
@@ -62,6 +82,7 @@ class LensFactory(gl.Contract):
         self.lens_code = lens_code
         self.creation_stake = creation_stake
         self.owner = gl.message.sender_address
+        self.collected_fees = u256(0)
 
     @gl.public.write.payable
     def create_lens(
@@ -75,8 +96,10 @@ class LensFactory(gl.Contract):
             raise gl.vm.UserError(
                 f"Creation stake too low: sent {gl.message.value}, requires {self.creation_stake}"
             )
-        if not sources:
-            raise gl.vm.UserError("At least one source is required.")
+        if len(sources) < MIN_SOURCES:
+            raise gl.vm.UserError(
+                f"At least {MIN_SOURCES} sources are required for evidentiary corroboration."
+            )
         if len(sources) > MAX_SOURCES:
             raise gl.vm.UserError(f"At most {MAX_SOURCES} sources are allowed.")
         if any(
@@ -100,6 +123,9 @@ class LensFactory(gl.Contract):
         address_hex = contract_address.as_hex
         self.lens_addresses.append(address_hex)
 
+        amount = int(gl.message.value)
+        self.collected_fees = u256(int(self.collected_fees) + amount)
+
         meta = {
             "address": address_hex,
             "sources": sources,
@@ -108,10 +134,21 @@ class LensFactory(gl.Contract):
             "description": description,
             "creator": gl.message.sender_address.as_hex,
             "created_at": str(_consensus_now()),
-            "stake": str(int(gl.message.value)),
+            "stake": str(amount),
         }
         self.lens_meta[_normalize_address(address_hex)] = json.dumps(meta)
         return address_hex
+
+    @gl.public.write
+    def withdraw_fees(self) -> None:
+        if gl.message.sender_address.as_hex != self.owner.as_hex:
+            raise gl.vm.UserError("Only the factory owner may withdraw collected fees.")
+        amount = int(self.collected_fees)
+        if amount == 0:
+            raise gl.vm.UserError("No fees to withdraw.")
+        # Effects before interaction.
+        self.collected_fees = u256(0)
+        _Recipient(self.owner).emit_transfer(value=u256(amount))
 
     @gl.public.view
     def get_owner(self) -> str:
@@ -120,6 +157,10 @@ class LensFactory(gl.Contract):
     @gl.public.view
     def get_creation_stake(self) -> str:
         return str(int(self.creation_stake))
+
+    @gl.public.view
+    def get_collected_fees(self) -> str:
+        return str(int(self.collected_fees))
 
     @gl.public.view
     def get_lenses(self) -> list[str]:

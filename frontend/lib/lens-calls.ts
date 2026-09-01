@@ -71,6 +71,31 @@ export async function createLens(
   return hash as `0x${string}`;
 }
 
+export async function fetchCollectedFees(
+  client: GenLayerClient<GenLayerChain>,
+  factoryAddress: `0x${string}`
+): Promise<string> {
+  const result = await client.readContract({
+    address: factoryAddress,
+    functionName: LENS_FACTORY_METHODS.getCollectedFees,
+    args: [],
+  });
+  return result as unknown as string;
+}
+
+export async function withdrawFees(
+  client: GenLayerClient<GenLayerChain>,
+  factoryAddress: `0x${string}`
+): Promise<`0x${string}`> {
+  const hash = await client.writeContract({
+    address: factoryAddress,
+    functionName: LENS_FACTORY_METHODS.withdrawFees,
+    args: [],
+    value: 0n,
+  });
+  return hash as `0x${string}`;
+}
+
 /**
  * create_lens's write-transaction result exposes ACCEPTED/FINALIZED status,
  * not a decoded method return value in a stable, documented shape -- so
@@ -208,6 +233,20 @@ export async function fetchBacking(
 // Lens writes
 // ---------------------------------------------------------------------
 
+export async function addSource(
+  client: GenLayerClient<GenLayerChain>,
+  lensAddress: `0x${string}`,
+  url: string
+): Promise<`0x${string}`> {
+  const hash = await client.writeContract({
+    address: lensAddress,
+    functionName: LENS_METHODS.addSource,
+    args: [url],
+    value: 0n,
+  });
+  return hash as `0x${string}`;
+}
+
 export async function submitInterpretation(
   client: GenLayerClient<GenLayerChain>,
   lensAddress: `0x${string}`,
@@ -258,6 +297,20 @@ export async function adjudicate(
     args: [],
     value: 0n,
     consensusMaxRotations: ADJUDICATE_MAX_ROTATIONS,
+  });
+  return hash as `0x${string}`;
+}
+
+export async function cancelRound(
+  client: GenLayerClient<GenLayerChain>,
+  lensAddress: `0x${string}`,
+  round: string
+): Promise<`0x${string}`> {
+  const hash = await client.writeContract({
+    address: lensAddress,
+    functionName: LENS_METHODS.cancelRound,
+    args: [round],
+    value: 0n,
   });
   return hash as `0x${string}`;
 }

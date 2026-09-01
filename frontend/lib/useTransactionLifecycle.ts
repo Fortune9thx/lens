@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { TransactionStatus } from "genlayer-js/types";
 import type { GenLayerClient, GenLayerChain, GenLayerTransaction } from "genlayer-js/types";
-import { pollConsensusStatus, PollCancelledError } from "./genlayer-client";
+import { pollConsensusStatus, PollCancelledError, describeTransactionOutcome } from "./genlayer-client";
 
 export type LifecyclePhase = "idle" | "submitting" | "polling" | "success" | "error";
 
@@ -85,17 +85,13 @@ export function useTransactionLifecycle(client: GenLayerClient<GenLayerChain> | 
           { isCancelled: () => cancelledRef.current, requireFinalized: options?.requireFinalized }
         );
         if (cancelledRef.current) return;
-        const failed =
-          transaction.statusName === TransactionStatus.UNDETERMINED ||
-          transaction.statusName === TransactionStatus.CANCELED ||
-          transaction.statusName === TransactionStatus.VALIDATORS_TIMEOUT ||
-          transaction.statusName === TransactionStatus.LEADER_TIMEOUT;
+        const outcome = describeTransactionOutcome(transaction);
         setState({
-          phase: failed ? "error" : "success",
+          phase: outcome.succeeded ? "success" : "error",
           hash,
           status: transaction.statusName ?? null,
           transaction,
-          error: failed ? `Transaction did not succeed (${transaction.statusName}).` : null,
+          error: outcome.succeeded ? null : outcome.reason,
         });
       } catch (err) {
         if (cancelledRef.current || err instanceof PollCancelledError) return;

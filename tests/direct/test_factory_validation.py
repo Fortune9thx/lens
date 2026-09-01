@@ -1,5 +1,6 @@
 """
-Direct-mode tests for LensFactory -- validation guard clauses only.
+Direct-mode tests for LensFactory -- validation guard clauses, and the
+withdraw_fees() recovery path.
 
 Scope note: create_lens's actual gl.deploy_contract call (spawning a child
 Lens) is NOT exercised here. gltest's direct-mode WASI mock has no default
@@ -14,9 +15,9 @@ integration-test-only -- see tests/integration/test_full_lifecycle.py.
 
 from gltest.direct import VMContext, deploy_contract, create_test_addresses
 
-from conftest import LENS_FACTORY_PATH, LENS_PATH
+from conftest import LENS_FACTORY_PATH, LENS_PATH, to_hex
 
-SOURCES = ["https://example.com/feed"]
+SOURCES = ["https://example.com/feed", "https://example.org/feed"]
 
 
 def _deploy_factory(vm, owner, creation_stake=0):
@@ -32,6 +33,7 @@ def test_factory_deploys_with_owner_and_stake():
         factory = _deploy_factory(vm, owner, creation_stake=100)
         assert factory.get_creation_stake() == "100"
         assert factory.get_lenses_count() == 0
+        assert factory.get_collected_fees() == "0"
 
 
 def test_factory_requires_lens_code():
@@ -52,6 +54,17 @@ def test_create_lens_rejects_insufficient_stake():
             factory.create_lens(SOURCES, "market", "Title", "Desc")
 
 
+def test_create_lens_rejects_single_source():
+    vm = VMContext()
+    owner, alice = create_test_addresses(2)
+    with vm.activate():
+        factory = _deploy_factory(vm, owner, creation_stake=0)
+        vm.sender = alice
+        vm.value = 0
+        with vm.expect_revert("At least 2 sources"):
+            factory.create_lens(["https://example.com/feed"], "market", "Title", "Desc")
+
+
 def test_create_lens_rejects_no_sources():
     vm = VMContext()
     owner, alice = create_test_addresses(2)
@@ -59,7 +72,7 @@ def test_create_lens_rejects_no_sources():
         factory = _deploy_factory(vm, owner, creation_stake=0)
         vm.sender = alice
         vm.value = 0
-        with vm.expect_revert("At least one source"):
+        with vm.expect_revert("At least 2 sources"):
             factory.create_lens([], "market", "Title", "Desc")
 
 
@@ -71,7 +84,7 @@ def test_create_lens_rejects_bad_url():
         vm.sender = alice
         vm.value = 0
         with vm.expect_revert("http(s)"):
-            factory.create_lens(["not-a-url"], "market", "Title", "Desc")
+            factory.create_lens(["https://example.com/feed", "not-a-url"], "market", "Title", "Desc")
 
 
 def test_create_lens_rejects_missing_type():
@@ -101,5 +114,28 @@ def test_get_owner_matches_deployer():
     owner, = create_test_addresses(1)
     with vm.activate():
         factory = _deploy_factory(vm, owner, creation_stake=0)
-        from conftest import to_hex
         assert factory.get_owner().lower() == to_hex(owner).lower()
+
+
+# ------------------------------------------------------------------
+# withdraw_fees() -- the factory-creation-fee recovery path
+# ------------------------------------------------------------------
+
+def test_withdraw_fees_only_owner():
+    vm = VMContext()
+    owner, alice = create_test_addresses(2)
+    with vm.activate():
+        factory = _deploy_factory(vm, owner, creation_stake=0)
+        vm.sender = alice
+        with vm.expect_revert("Only the factory owner"):
+            factory.withdraw_fees()
+
+
+def test_withdraw_fees_rejects_when_nothing_collected():
+    vm = VMContext()
+    owner, = create_test_addresses(1)
+    with vm.activate():
+        factory = _deploy_factory(vm, owner, creation_stake=0)
+        vm.sender = owner
+        with vm.expect_revert("No fees to withdraw"):
+            factory.withdraw_fees()

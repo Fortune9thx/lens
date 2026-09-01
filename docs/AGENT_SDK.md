@@ -32,7 +32,14 @@ const output = await client.readContract({
 // {
 //   has_live: boolean,
 //   interpretation: { id, round, author, content, structured_claims, total_stake, backer_count, created_at },
-//   reasoning: { reasoning, confidence, evidence_snapshot, evaluated_at, sources_checked },
+//   reasoning: {
+//     reasoning, confidence, evaluated_at, sources_checked,
+//     outcome: "decided" | "inconclusive",
+//     evidence_snapshot: { url: string, excerpt: string }[],  // deterministically
+//       // sliced from the ACTUAL fetched content in contract code -- never
+//       // an LLM self-report, so you can independently sanity-check the
+//       // reasoning against what was really fetched.
+//   },
 // }
 // confidence is a decimal STRING ("0.85"), never a float -- GenVM calldata
 // has no float type. Parse with Number()/parseFloat() yourself.
@@ -40,6 +47,11 @@ if (output.has_live) {
   console.log(output.interpretation.content, output.reasoning.confidence);
 }
 ```
+
+**Verify before you trust it.** `has_live: true` only means *some* round produced a decided winner
+at some point — it does not mean the *current* round was decided. Check `get_round_info(current_round)`
+if you need to know whether adjudication is still pending, and always check `reasoning.outcome` /
+`reasoning.confidence` rather than assuming a high-stakes decision was well-supported.
 
 ## Open a Lens
 
@@ -54,7 +66,10 @@ const hash = await client.writeContract({
   address: FACTORY_ADDRESS,
   functionName: "create_lens",
   args: [
-    ["https://example.com/live-feed"], // sources
+    // At least 2 sources are required -- LensFactory/Lens both reject a
+    // single source, since one (possibly self-controlled) URL isn't
+    // enough to adjudicate against.
+    ["https://example.com/live-feed", "https://example.org/live-feed"],
     "market",                          // interpretation_type
     "BTC Dominance Trend",             // title
     "Tracks the live narrative around BTC dominance.", // description
@@ -62,7 +77,7 @@ const hash = await client.writeContract({
   value: 0n, // creation stake, in wei -- check get_creation_stake() first
 });
 
-await client.waitForTransactionReceipt({ hash });
+await client.waitForTransactionReceipt({ hash, status: "FINALIZED" });
 ```
 
 `create_lens`'s decoded return value is the new Lens contract's address. Since decoding a write
@@ -70,7 +85,25 @@ method's own return value from the receipt isn't a stable, documented shape acro
 the more robust way to resolve it is to read `LensFactory.get_lenses()` before and after — the
 registry is append-only, so the new address is whatever appears at the index the list's length was
 before your transaction. See `frontend/lib/lens-calls.ts`'s `waitForNewLens` for the exact pattern
-this app uses.
+this app uses. Always wait for `FINALIZED`, not just `ACCEPTED`, before treating the new address as
+real and durable -- `ACCEPTED` can still be appealed and reversed.
+
+## Add a corroborating source
+
+Permissionless — you don't need to be the creator, or have any prior relationship to the Lens.
+
+```ts
+await client.writeContract({
+  address: lensAddress,
+  functionName: "add_source",
+  args: ["https://an-independent-source.example.com"],
+  value: 0n,
+});
+```
+
+Sources are append-only: there is no remove method, by design. If you think a Lens's evidence base
+looks narrow or biased, this is the actual "challenge path" — add a source yourself rather than
+needing the creator's cooperation.
 
 ## Submit an interpretation
 
@@ -113,36 +146,51 @@ const hash = await client.writeContract({
   consensusMaxRotations: 5,
 });
 
-// adjudicate()'s output (the new live interpretation) is exactly the kind
-// of state an external agent or contract may act on -- wait for FINALIZED,
-// not just ACCEPTED, before treating the new live output as settled.
-await client.waitForTransactionReceipt({ hash, status: "FINALIZED" });
+// adjudicate()'s output (the new live interpretation, if any) is exactly
+// the kind of state an external agent or contract may act on -- wait for
+// FINALIZED, not just ACCEPTED, before treating a new live output as
+// settled.
+const receipt = await client.waitForTransactionReceipt({ hash, status: "FINALIZED" });
+
+// adjudicate() returns "" when the round went inconclusive (no fetchable
+// evidence, or confidence below the bar) -- check get_round_info(round)
+// to distinguish "decided" from "inconclusive" rather than assuming a
+// winner was always produced.
 ```
 
-## Settle and claim
+## Settle, claim, or refund
+
+```ts
+const info = await client.readContract({
+  address: lensAddress, functionName: "get_round_info", args: [round],
+});
+
+if (info.status === "adjudicated") {
+  await client.writeContract({
+    address: lensAddress, functionName: "settle", args: [round], value: 0n,
+  });
+}
+
+// For "settled", "inconclusive", AND "cancelled" rounds alike -- claim()
+// pays a parimutuel share for a settled round, or a straight refund of
+// your own stake for an inconclusive/cancelled one. Same call either way.
+const claimable = await client.readContract({
+  address: lensAddress, functionName: "get_claimable", args: [round, myAddress],
+});
+if (claimable !== "0") {
+  await client.writeContract({
+    address: lensAddress, functionName: "claim", args: [round], value: 0n,
+  });
+}
+```
+
+If a round has sat open for more than 24 hours with nobody adjudicating it, anyone can unlock
+refunds for it:
 
 ```ts
 await client.writeContract({
-  address: lensAddress,
-  functionName: "settle",
-  args: [round],
-  value: 0n,
+  address: lensAddress, functionName: "cancel_round", args: [round], value: 0n,
 });
-
-const claimable = await client.readContract({
-  address: lensAddress,
-  functionName: "get_claimable",
-  args: [round, myAddress],
-});
-
-if (claimable !== "0") {
-  await client.writeContract({
-    address: lensAddress,
-    functionName: "claim",
-    args: [round],
-    value: 0n,
-  });
-}
 ```
 
 ## Poll for the next adjudication
@@ -165,7 +213,8 @@ async function waitForNextAdjudication(lensAddress: `0x${string}`, sinceRound: s
 
 | Contract | Method | Kind | Notes |
 | --- | --- | --- | --- |
-| LensFactory | `create_lens` | write, payable | Returns new Lens address (see resolution note above) |
+| LensFactory | `create_lens` | write, payable | Returns new Lens address (see resolution note above); requires ≥2 sources |
+| LensFactory | `withdraw_fees` | write | Owner-only. Recovers accumulated creation stakes -- the one privileged action in this system |
 | LensFactory | `get_lenses` | view | All Lens addresses, append-only |
 | LensFactory | `get_lenses_count` | view | |
 | LensFactory | `get_lenses_page` | view | `(offset, limit)` |
@@ -173,20 +222,23 @@ async function waitForNextAdjudication(lensAddress: `0x${string}`, sinceRound: s
 | LensFactory | `get_lenses_by_type` | view | |
 | LensFactory | `get_lenses_by_creator` | view | |
 | LensFactory | `get_creation_stake` | view | |
+| LensFactory | `get_collected_fees` | view | Undistributed balance `withdraw_fees` would pay out |
+| Lens | `add_source` | write | Permissionless, append-only, up to `MAX_SOURCES` (5) |
 | Lens | `submit_interpretation` | write, payable | Returns new interpretation id |
 | Lens | `back_interpretation` | write, payable | Add stake behind an existing interpretation, current round only |
-| Lens | `adjudicate` | write | Callable by anyone once the round has ≥1 interpretation |
-| Lens | `settle` | write | `(round)` — unlocks `claim()` for that round |
-| Lens | `claim` | write | `(round)` — pull-based parimutuel payout |
-| Lens | `close_lens` | write | Creator-only; stops new submissions/backing/adjudication |
+| Lens | `adjudicate` | write | Callable by anyone once the round has ≥1 interpretation. Returns `""` on an inconclusive round |
+| Lens | `cancel_round` | write | `(round)` — permissionless, only after `ROUND_TIMEOUT_SECONDS` (24h) with no adjudication |
+| Lens | `settle` | write | `(round)` — unlocks `claim()` for an *adjudicated* round only |
+| Lens | `claim` | write | `(round)` — parimutuel payout (settled) or full refund (inconclusive/cancelled) |
+| Lens | `close_lens` | write | Creator-only; stops new submissions/backing/adjudication and immediately cancels the current round if it's still open |
 | Lens | `get_lens_info` | view | Full state |
 | Lens | `get_live_interpretation` | view | The single most important call for external readers |
 | Lens | `get_interpretation` | view | `(interpretation_id)` |
 | Lens | `get_round_interpretations` | view | `(round)` |
-| Lens | `get_round_info` | view | `(round)` — status, pool, winner, reasoning |
+| Lens | `get_round_info` | view | `(round)` — status, opened_at, pool, winner, reasoning |
 | Lens | `get_adjudication_log` | view | Full history, most recent 50 |
 | Lens | `get_backing` | view | `(round, interpretation_id, address)` |
-| Lens | `get_claimable` | view | `(round, address)` — preview before claiming |
+| Lens | `get_claimable` | view | `(round, address)` — preview before claiming, correct for both payout and refund cases |
 | Lens | `is_claimed` | view | `(round, address)` |
 
 ## Settling against a Lens from another GenLayer contract

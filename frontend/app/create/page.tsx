@@ -14,7 +14,7 @@ import { useGenLayerClient, getReadOnlyClient } from "@/lib/genlayer-client";
 import { useTransactionLifecycle } from "@/lib/useTransactionLifecycle";
 import { createLens, fetchLenses, fetchCreationStake, waitForNewLens } from "@/lib/lens-calls";
 import { getLensFactoryAddress, isLensFactoryDeployed } from "@/lib/contracts";
-import { INTERPRETATION_TYPES } from "@/lib/lens-abi";
+import { INTERPRETATION_TYPES, MIN_SOURCES, MAX_SOURCES } from "@/lib/lens-abi";
 import { cn, formatGen } from "@/lib/utils";
 
 const STEP_LABELS = ["Sources", "Details", "Review & Open"];
@@ -25,7 +25,7 @@ export default function CreateLensPage() {
   const { state, run, reset } = useTransactionLifecycle(client);
 
   const [step, setStep] = useState(0);
-  const [sources, setSources] = useState<string[]>([""]);
+  const [sources, setSources] = useState<string[]>(["", ""]);
   const [interpretationType, setInterpretationType] = useState<string>("market");
   const [customType, setCustomType] = useState("");
   const [title, setTitle] = useState("");
@@ -60,10 +60,12 @@ export default function CreateLensPage() {
 
   function validateStep(current: number): string | null {
     if (current === 0) {
-      if (cleanSources.length === 0) return "Add at least one source URL.";
-      if (cleanSources.length > 5) return "At most 5 sources are allowed.";
+      if (cleanSources.length < MIN_SOURCES)
+        return `Add at least ${MIN_SOURCES} source URLs -- a single, possibly self-controlled source isn't enough to adjudicate against.`;
+      if (cleanSources.length > MAX_SOURCES) return `At most ${MAX_SOURCES} sources are allowed.`;
       const bad = cleanSources.find((s) => !/^https?:\/\//i.test(s));
       if (bad) return `"${bad}" must start with http:// or https://`;
+      if (new Set(cleanSources).size !== cleanSources.length) return "Sources must be unique.";
     }
     if (current === 1) {
       if (!effectiveType) return "Choose or enter an interpretation type.";
@@ -91,8 +93,14 @@ export default function CreateLensPage() {
     if (!client || !factoryAddress) return;
     const stakeWei = creationStake ? BigInt(creationStake) : 0n;
     const beforeLenses = await fetchLenses(getReadOnlyClient(), factoryAddress).catch(() => []);
-    await run(() =>
-      createLens(client, factoryAddress, cleanSources, effectiveType, title.trim(), description.trim(), stakeWei)
+    // A new Lens address is exactly the kind of output other things act on
+    // (the Explorer lists it, this page navigates the user straight to it,
+    // they immediately stake real GEN into it) -- ACCEPTED can still be
+    // appealed and reversed before FINALIZED, so this is one of the writes
+    // that must wait for the stronger guarantee before declaring success.
+    await run(
+      () => createLens(client, factoryAddress, cleanSources, effectiveType, title.trim(), description.trim(), stakeWei),
+      { requireFinalized: true }
     );
     setResolving(true);
     try {
@@ -185,7 +193,9 @@ export default function CreateLensPage() {
                 <div className="card-surface p-6">
                   <h2 className="text-lg font-semibold text-fg">What source is this Lens watching?</h2>
                   <p className="mt-1 text-sm text-fg-secondary">
-                    Add up to 5 live http(s) URLs. Validators fetch these fresh every time this Lens is adjudicated.
+                    Add {MIN_SOURCES}-{MAX_SOURCES} live http(s) URLs. At least {MIN_SOURCES} are required so no single
+                    (possibly self-controlled) source can decide adjudication alone. Validators fetch these fresh
+                    every time this Lens is adjudicated, and anyone can add more corroborating sources later.
                   </p>
                   <div className="mt-5 flex flex-col gap-3">
                     {sources.map((src, i) => (
@@ -199,7 +209,7 @@ export default function CreateLensPage() {
                           }}
                           placeholder="https://example.com/live-feed"
                         />
-                        {sources.length > 1 && (
+                        {sources.length > MIN_SOURCES && (
                           <button
                             onClick={() => setSources(sources.filter((_, idx) => idx !== i))}
                             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-fg-muted hover:bg-bg-subtle hover:text-negative"
@@ -210,7 +220,7 @@ export default function CreateLensPage() {
                         )}
                       </div>
                     ))}
-                    {sources.length < 5 && (
+                    {sources.length < MAX_SOURCES && (
                       <Button
                         variant="ghost"
                         size="sm"
