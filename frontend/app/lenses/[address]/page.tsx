@@ -14,7 +14,7 @@ import { SubmitInterpretationDialog } from "@/components/SubmitInterpretationDia
 import { AdjudicationTheater } from "@/components/AdjudicationTheater";
 import { SettlementPanel } from "@/components/SettlementPanel";
 import { AddSourceDialog } from "@/components/AddSourceDialog";
-import { getReadOnlyClient } from "@/lib/genlayer-client";
+import { getReadOnlyClient, readContractRetry } from "@/lib/genlayer-client";
 import {
   fetchLensInfo,
   fetchLiveInterpretation,
@@ -42,14 +42,22 @@ export default function LensDetailPage() {
 
   const refresh = useCallback(() => {
     if (!address) return;
+    setError(null);
     const client = getReadOnlyClient();
-    fetchLensInfo(client, address)
+    // Retried, not single-shot: a Lens navigated to right after creation
+    // (e.g. via "View your Lens") is a real, expected case of a freshly
+    // deployed contract not being readable for a few seconds yet -- a
+    // genuine, previously observed "contract not found" on first load, not
+    // a broken Lens. A bare single attempt used to fail hard and
+    // permanently on exactly this timing, with no way back short of a
+    // manual page reload.
+    readContractRetry(() => fetchLensInfo(client, address))
       .then((i) => {
         setInfo(i);
         return Promise.all([
-          fetchLiveInterpretation(client, address),
-          fetchRoundInterpretations(client, address, i.current_round),
-          fetchAdjudicationLog(client, address),
+          readContractRetry(() => fetchLiveInterpretation(client, address)),
+          readContractRetry(() => fetchRoundInterpretations(client, address, i.current_round)),
+          readContractRetry(() => fetchAdjudicationLog(client, address)),
         ]);
       })
       .then(([liveRes, roundRes, logRes]) => {
@@ -67,7 +75,11 @@ export default function LensDetailPage() {
   if (error) {
     return (
       <div className="mx-auto max-w-2xl px-6 py-24">
-        <EmptyState title="Couldn't load this Lens" description={error} />
+        <EmptyState
+          title="Couldn't load this Lens"
+          description={`${error} If this Lens was just created, it may still be propagating -- this can take a little longer than usual right now.`}
+          action={<Button onClick={refresh}>Retry</Button>}
+        />
       </div>
     );
   }

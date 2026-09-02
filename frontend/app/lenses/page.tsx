@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import { LensCard } from "@/components/LensCard";
-import { getReadOnlyClient } from "@/lib/genlayer-client";
+import { getReadOnlyClient, readContractRetry } from "@/lib/genlayer-client";
 import { fetchLenses, fetchLensMeta } from "@/lib/lens-calls";
 import { getLensFactoryAddress, isLensFactoryDeployed } from "@/lib/contracts";
 import { INTERPRETATION_TYPES } from "@/lib/lens-abi";
@@ -20,6 +20,7 @@ export default function ExplorerPage() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     if (!isLensFactoryDeployed()) {
@@ -29,11 +30,19 @@ export default function ExplorerPage() {
     const address = getLensFactoryAddress()!;
     const client = getReadOnlyClient();
     let cancelled = false;
+    setError(null);
+    setLenses(null);
 
-    fetchLenses(client, address)
+    // Retried, not single-shot -- Bradbury's read path has real, confirmed
+    // intermittent failures for genuinely valid contracts, independent of
+    // this app's logic. Per-Lens metadata reads keep their existing
+    // fail-soft "drop it from the list rather than block the page" filter,
+    // but now with a retry pass first so a transient blip doesn't silently
+    // hide a real Lens.
+    readContractRetry(() => fetchLenses(client, address))
       .then(async (addresses) => {
         const metas = await Promise.all(
-          addresses.map((a) => fetchLensMeta(client, address, a).catch(() => null))
+          addresses.map((a) => readContractRetry(() => fetchLensMeta(client, address, a)).catch(() => null))
         );
         if (!cancelled) setLenses(metas.filter((m): m is LensMeta => m !== null).reverse());
       })
@@ -44,7 +53,7 @@ export default function ExplorerPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshTick]);
 
   const filtered = useMemo(() => {
     if (!lenses) return null;
@@ -108,6 +117,7 @@ export default function ExplorerPage() {
           <EmptyState
             title="Couldn't load Lenses"
             description={error}
+            action={<Button onClick={() => setRefreshTick((t) => t + 1)}>Retry</Button>}
           />
         )}
 
